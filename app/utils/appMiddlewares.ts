@@ -20,13 +20,13 @@ import { NextResponse } from 'next/server';
  *   .run(handler);
  *
  * // A request without the correct header will receive:
- * // HTTP 415 – { "error": "Unsupported Media Type. Richiesto: application/json" }
+ * // HTTP 415 – { "error": "Unsupported Media Type. Expected: application/json" }
  */
 export const checkContentType = (req: Request) => {
     const contentType = req.headers.get('content-type');
     if (!contentType || !contentType.includes('application/json')) {
         return NextResponse.json(
-            { error: 'Unsupported Media Type. Richiesto: application/json' },
+            { error: 'Unsupported Media Type. Expected: application/json' },
             { status: 415 }
         );
     }
@@ -72,6 +72,6 @@ export const extractXAppName = (req: Request) => {
         );
     }
 
-    // Restituiamo il dato validato a runtime per il contesto
+    // Return the validated value to be merged into the pipeline context.
     return { appName };
 };

@@ -11,7 +11,7 @@ import { NextResponse } from 'next/server';
  * |---|---|
  * | `appName` | {@link extractXAppName} – extracted from the `x-app-name` request header |
  */
-interface MyContext {
+interface MyContext extends Record<string, string> {
     /** The validated value of the `x-app-name` request header. */
     appName: string;
 }
@@ -48,14 +48,14 @@ interface MyContext {
  * ```json
  * {
  *   "success": true,
- *   "message": "[App Router] Richiesta validata per: <appName>",
+ *   "message": "[App Router] Request validated for: <appName>",
  *   "payloadReceived": { ...requestBody }
  * }
  * ```
  *
  * **Validation error – HTTP 415** (missing / wrong Content-Type)
  * ```json
- * { "error": "Unsupported Media Type. Richiesto: application/json" }
+ * { "error": "Unsupported Media Type. Expected: application/json" }
  * ```
  *
  * **Validation error – HTTP 400** (missing `x-app-name` header)
@@ -76,20 +76,19 @@ interface MyContext {
  * //   -d '{"hello":"world"}'
  */
 export const POST = appPipeline<MyContext>()
-    .use(checkContentType) // 1. Verifica il content-type
-    .use(extractXAppName)  // 2. Estrae e valida l'app-name
+    .use(checkContentType)  // 1. Verify the content-type header
+    .use(extractXAppName)   // 2. Extract and validate the x-app-name header
     .run(async (req, context) => {
 
-        // --- SICUREZZA TOTALE ---
-        // context.appName è presente e tipizzato come stringa.
+        // context.appName is present and typed as a string.
         const { appName } = context;
 
-        // Nell'App Router, il parsing del body è asincrono e nativo:
+        // In the App Router, body parsing is native and asynchronous:
         const body = await req.json();
 
         return NextResponse.json({
             success: true,
-            message: `[App Router] Richiesta validata per: ${appName}`,
+            message: `[App Router] Request validated for: ${appName}`,
             payloadReceived: body,
         });
     });

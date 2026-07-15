@@ -1,6 +1,16 @@
 import { NextResponse } from 'next/server';
 
 /**
+ * The partial context contribution returned by a single middleware.
+ *
+ * A middleware that enriches the context returns an object whose keys are a
+ * *subset* of the accumulated context — not the whole thing.  This generic
+ * captures that "partial slice" concept separately from the full accumulated
+ * `TContext` that the middleware *receives*.
+ */
+type ContextSlice = Record<string, unknown>;
+
+/**
  * Type signature for a middleware function compatible with the {@link AppPipeline}.
  *
  * A middleware function receives the current request and the accumulated context object, and
@@ -15,19 +25,22 @@ import { NextResponse } from 'next/server';
  * Both synchronous and asynchronous middleware functions are supported.
  *
  * @template TContext - The shape of the accumulated context object at the point this middleware
- *   runs. Constrained to `Record<string, any>` so that `Object.assign` merges are type-safe.
+ *   runs. Constrained to {@link ContextSlice} so that `Object.assign` merges are type-safe.
+ * @template TNext - The shape of the *new* properties this middleware contributes to the context
+ *   when it succeeds. Defaults to `ContextSlice` (i.e. any plain object). The pipeline will
+ *   widen `TContext` to `TContext & TNext` before passing it to the next middleware.
  *
  * @param req - The incoming {@link Request} object provided by the Next.js App Router.
  * @param context - The context object accumulated by all previously executed middlewares.
  *
  * @returns One of:
- *   - `Promise<TContext | Response | void>` for async middleware, or
- *   - `TContext | Response | void` for synchronous middleware.
+ *   - `Promise<TNext | Response | void>` for async middleware, or
+ *   - `TNext | Response | void` for synchronous middleware.
  */
-type AppMiddlewareFn<TContext extends Record<string, any>> = (
+type AppMiddlewareFn<TContext extends ContextSlice, TNext extends ContextSlice = ContextSlice> = (
     req: Request,
     context: TContext
-) => Promise<TContext | Response | void> | TContext | Response | void;
+) => Promise<TNext | Response | void> | TNext | Response | void;
 
 /**
  * A type-safe, chainable middleware pipeline for Next.js App Router route handlers.
@@ -47,11 +60,12 @@ type AppMiddlewareFn<TContext extends Record<string, any>> = (
  *    returned automatically.
  *
  * ### Generic parameter
- * `TContext` accumulates the shape of the context as middlewares are composed.  Use it to
- * get fully-typed access to context properties inside the final handler.
+ * `TContext` accumulates the shape of the context as middlewares are composed — each call to
+ * `.use()` widens the type to `TContext & TNext`.  Use it to get fully-typed access to context
+ * properties inside the final handler without extra type assertions.
  *
  * @template TContext - Shape of the shared context object passed between middlewares and the
- *   final handler. Must extend `Record<string, any>`.
+ *   final handler. Must extend {@link ContextSlice}.
  *
  * @example
  * // app/api/example/route.ts
@@ -68,34 +82,41 @@ type AppMiddlewareFn<TContext extends Record<string, any>> = (
  *     return NextResponse.json({ success: true, appName: context.appName, body });
  *   });
  */
-export class AppPipeline<TContext extends Record<string, any>> {
+export class AppPipeline<TContext extends ContextSlice> {
     /** Ordered list of registered middleware functions. */
-    private middlewares: AppMiddlewareFn<TContext>[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    private middlewares: AppMiddlewareFn<any, any>[] = [];
 
     /**
      * Registers a middleware function and appends it to the execution chain.
+     *
+     * Each call to `.use()` **widens the accumulated context type** by intersecting `TContext`
+     * with the `TNext` type contributed by the new middleware.  This means the *next* `.use()`
+     * call and the final `.run()` handler both see all properties added by previous middlewares
+     * without requiring extra type assertions.
      *
      * Middlewares are executed in the order they are registered. Each middleware
      * receives the same `req` object and the **same mutable `context`** that has
      * been progressively enriched by all previous middlewares.
      *
-     * The method returns `this` (the same `AppPipeline` instance) to enable fluent
-     * method chaining.
+     * The method returns a new `AppPipeline<TContext & TNext>` instance to enable fluent
+     * method chaining with accumulated types.
      *
+     * @template TNext - The shape of the new context properties contributed by `fn`.
      * @param fn - The {@link AppMiddlewareFn} to add to the pipeline.
-     * @returns The current {@link AppPipeline} instance (for chaining).
+     * @returns A new {@link AppPipeline} instance typed to `TContext & TNext` (for chaining).
      *
      * @example
      * pipeline
-     *   .use(authMiddleware)
-     *   .use(rateLimitMiddleware)
+     *   .use(authMiddleware)       // contributes { userId: string }
+     *   .use(rateLimitMiddleware)  // can now read context.userId
      *   .use(loggingMiddleware);
      */
-    use(
-        fn: AppMiddlewareFn<TContext>
-    ): AppPipeline<TContext> {
+    use<TNext extends ContextSlice>(
+        fn: AppMiddlewareFn<TContext, TNext>
+    ): AppPipeline<TContext & TNext> {
         this.middlewares.push(fn);
-        return this as any;
+        return this as unknown as AppPipeline<TContext & TNext>;
     }
 
     /**
@@ -114,7 +135,8 @@ export class AppPipeline<TContext extends Record<string, any>> {
      *      `Object.assign`.
      *    - If a middleware throws, a **500 Internal Server Error** JSON response is returned.
      * 3. Once all middlewares succeed, the `handler` is called with `(req, context)` and its
-     *    return value is forwarded to the client.
+     *    return value is forwarded to the client. Errors thrown by the handler are also caught
+     *    and converted to a **500 Internal Server Error** response.
      *
      * @param handler - The final route handler that receives the fully-enriched `context`.
      *   Must return a `Promise<Response>` or a synchronous `Response`.
@@ -135,8 +157,7 @@ export class AppPipeline<TContext extends Record<string, any>> {
             req: Request,
             context: TContext
         ) => Promise<Response> | Response
-    ) {
-        // Restituiamo la firma standard dell'App Router: (request) => Promise<Response>
+    ): (req: Request) => Promise<Response> {
         return async (req: Request): Promise<Response> => {
             const context = {} as TContext;
 
@@ -144,28 +165,34 @@ export class AppPipeline<TContext extends Record<string, any>> {
                 try {
                     const result = await middleware(req, context);
 
-                    // GESTIONE DEL BLOCCO FLUSSO:
-                    // Se il middleware restituisce una Response, significa che c'è stato un errore.
-                    // Interrompiamo immediatamente la catena e ritorniamo la risposta al client.
+                    // FLOW HALT:
+                    // If the middleware returns a Response, halt the chain immediately
+                    // and forward that response to the client.
                     if (result instanceof Response) {
                         return result;
                     }
 
-                    // ARRICCHIMENTO DEL FLUSSO:
-                    // Se il middleware restituisce un oggetto valido, lo inseriamo nel contesto.
-                    if (result && typeof result === 'object') {
+                    // CONTEXT ENRICHMENT:
+                    // If the middleware returns a plain object, merge it into the context
+                    // so that subsequent middlewares and the final handler can read it.
+                    if (result !== null && typeof result === 'object') {
                         Object.assign(context, result);
                     }
-                } catch (error: any) {
-                    return NextResponse.json(
-                        { error: error.message || 'Internal Server Error nel Middleware' },
-                        { status: 500 }
-                    );
+                } catch (error: unknown) {
+                    const message =
+                        error instanceof Error ? error.message : 'Internal Server Error';
+                    return NextResponse.json({ error: message }, { status: 500 });
                 }
             }
 
-            // Eseguiamo l'handler finale passando il contesto arricchito
-            return handler(req, context);
+            // Execute the final handler with the fully-enriched context.
+            try {
+                return await handler(req, context);
+            } catch (error: unknown) {
+                const message =
+                    error instanceof Error ? error.message : 'Internal Server Error';
+                return NextResponse.json({ error: message }, { status: 500 });
+            }
         };
     }
 }
@@ -183,8 +210,8 @@ export class AppPipeline<TContext extends Record<string, any>> {
  * ```
  *
  * @template TContext - The shape of the context object that will be built up by the registered
- *   middlewares and passed to the final handler. Must extend `Record<string, any>`.
+ *   middlewares and passed to the final handler. Must extend {@link ContextSlice}.
  *
  * @returns A fresh, empty {@link AppPipeline} instance typed to `TContext`.
  */
-export const appPipeline = <TContext extends Record<string, any>>() => new AppPipeline<TContext>();
+export const appPipeline = <TContext extends ContextSlice>() => new AppPipeline<TContext>();
