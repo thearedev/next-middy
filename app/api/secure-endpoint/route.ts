@@ -1,6 +1,19 @@
-import { checkContentType, extractXAppName } from '@/app/utils/appMiddlewares';
+import { checkContentType, extractXAppName, validateBody } from '@/app/utils/appMiddlewares';
 import { appPipeline } from '@/app/utils/appPipeline';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+/**
+ * Zod schema describing the expected JSON request body for this endpoint.
+ *
+ * Validated by {@link validateBody} before the final handler runs.
+ */
+const RequestBodySchema = z.object({
+    /** Display name of the resource being created. */
+    name: z.string().min(1, 'name is required'),
+    /** Contact email address — must be a valid email format. */
+    email: z.string().email('must be a valid email address'),
+});
 
 /**
  * Shape of the typed context object built up by the middleware pipeline for this route.
@@ -10,10 +23,13 @@ import { NextResponse } from 'next/server';
  * | Property | Source middleware |
  * |---|---|
  * | `appName` | {@link extractXAppName} – extracted from the `x-app-name` request header |
+ * | `body` | {@link validateBody} – parsed and validated JSON request body |
  */
-interface MyContext extends Record<string, string> {
+interface MyContext extends Record<string, unknown> {
     /** The validated value of the `x-app-name` request header. */
     appName: string;
+    /** The validated and type-narrowed request body. */
+    body: z.infer<typeof RequestBodySchema>;
 }
 
 /**
@@ -76,15 +92,13 @@ interface MyContext extends Record<string, string> {
  * //   -d '{"hello":"world"}'
  */
 export const POST = appPipeline<MyContext>()
-    .use(checkContentType)  // 1. Verify the content-type header
-    .use(extractXAppName)   // 2. Extract and validate the x-app-name header
-    .run(async (req, context) => {
+    .use(checkContentType)               // 1. Verify the content-type header
+    .use(extractXAppName)                // 2. Extract and validate the x-app-name header
+    .use(validateBody(RequestBodySchema)) // 3. Parse and validate the request body
+    .run(async (_req, context) => {
 
-        // context.appName is present and typed as a string.
-        const { appName } = context;
-
-        // In the App Router, body parsing is native and asynchronous:
-        const body = await req.json();
+        // context.appName and context.body are both present and fully typed.
+        const { appName, body } = context;
 
         return NextResponse.json({
             success: true,

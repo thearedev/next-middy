@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 
 /**
  * Middleware that enforces the `Content-Type: application/json` header on incoming requests.
@@ -75,3 +76,62 @@ export const extractXAppName = (req: Request) => {
     // Return the validated value to be merged into the pipeline context.
     return { appName };
 };
+
+/**
+ * Middleware factory that parses the request body and validates it against a Zod schema.
+ *
+ * On success the validated (and type-narrowed) body is returned as `{ body: T }`, which the
+ * {@link AppPipeline} runner merges into the shared context, making `context.body` available
+ * — fully typed — to every subsequent middleware and to the final route handler.
+ *
+ * On failure the pipeline is short-circuited with an **HTTP 422 Unprocessable Entity** response
+ * containing Zod's flattened field errors, so callers always receive a structured error.
+ *
+ * @template TSchema - The Zod schema type used for validation.
+ * @param schema - A Zod schema that describes the expected request body shape.
+ *
+ * @returns An {@link AppMiddlewareFn} that contributes `{ body: z.infer<TSchema> }` to context.
+ *
+ * @example
+ * import { z } from 'zod';
+ *
+ * const CreateUserSchema = z.object({
+ *   name: z.string().min(1),
+ *   email: z.string().email(),
+ * });
+ *
+ * export const POST = appPipeline<MyContext>()
+ *   .use(checkContentType)
+ *   .use(validateBody(CreateUserSchema)) // context.body is now { name: string; email: string }
+ *   .run(async (req, context) => {
+ *     console.log(context.body.email); // fully typed, guaranteed valid
+ *   });
+ *
+ * // An invalid request body will receive:
+ * // HTTP 422 – { "error": { "fieldErrors": { "email": ["Invalid email"] }, "formErrors": [] } }
+ */
+export const validateBody =
+    <TSchema extends z.ZodType>(schema: TSchema) =>
+        async (req: Request): Promise<{ body: z.infer<TSchema> } | Response> => {
+            let raw: unknown;
+
+            try {
+                raw = await req.json();
+            } catch {
+                return NextResponse.json(
+                    { error: 'Request body is not valid JSON' },
+                    { status: 400 }
+                );
+            }
+
+            const result = schema.safeParse(raw);
+
+            if (!result.success) {
+                return NextResponse.json(
+                    { error: z.flattenError(result.error) },
+                    { status: 422 }
+                );
+            }
+
+            return { body: result.data };
+        };

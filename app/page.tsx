@@ -7,6 +7,7 @@ export default function Home() {
         <button onClick={callSuccessApi} className="text-black dark:text-white py-2 px-4 bg-gray-200 dark:bg-gray-700 rounded cursor-pointer">Call Success API</button>
         <button onClick={callFailContentTypeApi} className="text-black dark:text-white py-2 px-4 bg-gray-200 dark:bg-gray-700 rounded cursor-pointer">Call Fail Content-Type API</button>
         <button onClick={callFailXAppNameApi} className="text-black dark:text-white py-2 px-4 bg-gray-200 dark:bg-gray-700 rounded cursor-pointer">Call Fail X-App-Name API</button>
+        <button onClick={callFailInvalidBodyApi} className="text-black dark:text-white py-2 px-4 bg-gray-200 dark:bg-gray-700 rounded cursor-pointer">Call Fail Invalid Body API</button>
       </main>
     </div>
   );
@@ -19,7 +20,7 @@ const callSuccessApi = async () => {
       "Content-Type": "application/json",
       "x-app-name": "My-App",
     },
-    body: JSON.stringify({ message: "Hello from frontend!" }),
+    body: JSON.stringify({ name: 'My Name', email: 'my@email.com' }),
   });
 
   const data = await response.json();
@@ -33,7 +34,7 @@ const callFailContentTypeApi = async () => {
       "Content-Type": "application/xml",
       "x-app-name": "My-App",
     },
-    body: JSON.stringify({ message: "Hello from frontend!" }),
+    body: JSON.stringify({ name: 'My Name', email: 'my@email.com' }),
   });
 
   const data = await response.json();
@@ -48,7 +49,21 @@ const callFailXAppNameApi = async () => {
       "Content-Type": "application/json",
       "x-app-name": "",
     },
-    body: JSON.stringify({ message: "Hello from frontend!" }),
+    body: JSON.stringify({ name: 'My Name', email: 'my@email.com' }),
+  });
+
+  const data = await response.json();
+  console.log(data);
+};
+
+const callFailInvalidBodyApi = async () => {
+  const response = await fetch("http://localhost:3000/api/secure-endpoint", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-app-name": "My-App",
+    },
+    body: JSON.stringify({ name: 'My Name' }),
   });
 
   const data = await response.json();
