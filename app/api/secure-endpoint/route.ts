@@ -2,12 +2,79 @@ import { checkContentType, extractXAppName } from '@/app/utils/appMiddlewares';
 import { appPipeline } from '@/app/utils/appPipeline';
 import { NextResponse } from 'next/server';
 
-// Definiamo l'interfaccia del contesto che vogliamo usare nel nostro handler
+/**
+ * Shape of the typed context object built up by the middleware pipeline for this route.
+ *
+ * Each property is contributed by one of the middlewares registered via `.use()`:
+ *
+ * | Property | Source middleware |
+ * |---|---|
+ * | `appName` | {@link extractXAppName} – extracted from the `x-app-name` request header |
+ */
 interface MyContext {
+    /** The validated value of the `x-app-name` request header. */
     appName: string;
 }
 
-// Esportiamo la funzione POST avvolta nella nostra pipeline
+/**
+ * Next.js App Router **POST** route handler for `/api/secure-endpoint`.
+ *
+ * This handler is assembled through an {@link AppPipeline} that enforces a two-step validation
+ * chain before allowing any business logic to execute:
+ *
+ * ### Pipeline stages
+ *
+ * 1. **`checkContentType`** – Verifies that the request carries a
+ *    `Content-Type: application/json` header. If not, the pipeline is halted with
+ *    `HTTP 415 Unsupported Media Type`.
+ *
+ * 2. **`extractXAppName`** – Reads the custom `x-app-name` header, validates its presence, and
+ *    injects it into the typed context as `context.appName`. If the header is absent, the
+ *    pipeline is halted with `HTTP 400 Bad Request`.
+ *
+ * 3. **Final handler** – Runs only when both middlewares succeed. It reads the JSON request
+ *    body and returns a success payload that echoes back the `appName` and the received body.
+ *
+ * ### Required request headers
+ *
+ * | Header | Required | Description |
+ * |---|---|---|
+ * | `Content-Type` | ✅ | Must be `application/json` |
+ * | `x-app-name` | ✅ | Identifies the calling application |
+ *
+ * ### Response shape
+ *
+ * **Success – HTTP 200**
+ * ```json
+ * {
+ *   "success": true,
+ *   "message": "[App Router] Richiesta validata per: <appName>",
+ *   "payloadReceived": { ...requestBody }
+ * }
+ * ```
+ *
+ * **Validation error – HTTP 415** (missing / wrong Content-Type)
+ * ```json
+ * { "error": "Unsupported Media Type. Richiesto: application/json" }
+ * ```
+ *
+ * **Validation error – HTTP 400** (missing `x-app-name` header)
+ * ```json
+ * { "error": "Missing required header: x-app-name" }
+ * ```
+ *
+ * **Unexpected error – HTTP 500**
+ * ```json
+ * { "error": "<error message>" }
+ * ```
+ *
+ * @example
+ * // Example curl request:
+ * // curl -X POST http://localhost:3000/api/secure-endpoint \
+ * //   -H "Content-Type: application/json" \
+ * //   -H "x-app-name: my-service" \
+ * //   -d '{"hello":"world"}'
+ */
 export const POST = appPipeline<MyContext>()
     .use(checkContentType) // 1. Verifica il content-type
     .use(extractXAppName)  // 2. Estrae e valida l'app-name
