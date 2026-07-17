@@ -6,7 +6,7 @@ import { NextApiRequest, NextApiResponse } from 'next';
 export const checkContentType = (req: NextApiRequest, res: NextApiResponse) => {
     const contentType = req.headers['content-type'];
     if (!contentType || !contentType.includes('application/json')) {
-        res.status(415).json({ error: 'Unsupported Media Type. Richiesto: application/json' });
+        res.status(415).json({ error: 'Unsupported Media Type. Required: application/json' });
         return
     }
 };
