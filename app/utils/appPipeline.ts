@@ -11,16 +11,29 @@ import { NextResponse } from 'next/server';
 type ContextSlice = Record<string, unknown>;
 
 /**
+ * Type signature for the route segment context provided by the Next.js App Router for dynamic routes (e.g. `[id]`).
+ *
+ * In Next.js 15+, `params` is passed as a `Promise` that resolves to the route parameters object,
+ * whereas in Next.js 13/14 `params` is a plain object. This type accommodates both.
+ */
+export type RouteSegmentContext = {
+    /**
+     * Route parameters for the current request, which may be a Promise (Next.js 15+) or a plain object (Next.js 13/14).
+     */
+    params?: Promise<Record<string, string | string[]>> | Record<string, string | string[]>;
+};
+
+/**
  * Type signature for a middleware function compatible with the {@link AppPipeline}.
  *
- * A middleware function receives the current request and the accumulated context object, and
- * may return one of three things that the pipeline runner interprets differently:
+ * A middleware function receives the incoming Web standard `Request` object and the accumulated
+ * context object, and may return one of three things that the pipeline runner interprets differently:
  *
  * | Return value | Pipeline behaviour |
  * |---|---|
  * | `void` / `undefined` | Continue to the next middleware unchanged. |
  * | Plain `object` | Merged into `context` via `Object.assign` before the next middleware runs. |
- * | `Response` / `NextResponse` | Pipeline is **halted immediately** and the response is sent to the client. |
+ * | {@link Response} | Pipeline is **halted immediately** and this response is returned directly (e.g. HTTP 401, 403, 302). |
  *
  * Both synchronous and asynchronous middleware functions are supported.
  *
@@ -30,8 +43,8 @@ type ContextSlice = Record<string, unknown>;
  *   when it succeeds. Defaults to `ContextSlice` (i.e. any plain object). The pipeline will
  *   widen `TContext` to `TContext & TNext` before passing it to the next middleware.
  *
- * @param req - The incoming {@link Request} object provided by the Next.js App Router.
- * @param context - The context object accumulated by all previously executed middlewares.
+ * @param req - The incoming Web API {@link Request} object provided by the Next.js App Router.
+ * @param context - The context object accumulated by all previously executed middlewares (including resolved route parameters).
  *
  * @returns One of:
  *   - `Promise<TNext | Response | void>` for async middleware, or
@@ -43,25 +56,47 @@ type AppMiddlewareFn<TContext extends ContextSlice, TNext extends ContextSlice =
 ) => Promise<TNext | Response | void> | TNext | Response | void;
 
 /**
- * A type-safe, chainable middleware pipeline for Next.js App Router route handlers.
+ * Helper function to determine whether an error is a Next.js native control-flow exception
+ * (e.g., produced by `redirect()` or `notFound()`).
+ *
+ * Next.js relies on special thrown objects containing a `digest` property starting with
+ * `'NEXT_REDIRECT'` or `'NEXT_NOT_FOUND'` to control navigation. These errors must be rethrown
+ * so that Next.js can handle the redirect or 404 response properly rather than converting
+ * them into generic HTTP 500 responses.
+ *
+ * @param error - The caught error or thrown value to evaluate.
+ * @returns `true` if `error` is a Next.js redirect or notFound internal exception; otherwise `false`.
+ */
+function isNextInternalError(error: unknown): boolean {
+    if (typeof error === 'object' && error !== null && 'digest' in error) {
+        const digest = (error as { digest?: string }).digest;
+        return typeof digest === 'string' && (digest.startsWith('NEXT_REDIRECT') || digest.startsWith('NEXT_NOT_FOUND'));
+    }
+    return false;
+}
+
+/**
+ * A type-safe, chainable middleware pipeline for Next.js App Router Route Handlers.
  *
  * `AppPipeline` implements a **chain-of-responsibility** pattern where each middleware can
  * inspect or enrich the shared request context, or terminate the pipeline early by returning
- * a `Response`. The final route handler is only invoked when **all** middlewares complete
- * successfully.
+ * a Web standard {@link Response} directly. The final route handler is only invoked when **all**
+ * middlewares complete successfully and no middleware has returned a response.
  *
  * ### How it works
  * 1. Call `.use(middleware)` one or more times to register middlewares in execution order.
- * 2. Call `.run(handler)` to close the chain and receive a standard App Router route handler
- *    `(req: Request) => Promise<Response>` that can be exported directly from a route file.
- * 3. At runtime, each middleware is awaited in sequence. If it returns a `Response` the chain
- *    is aborted and that response is sent to the client. If it returns a plain object that
- *    object is merged into `context`. If it throws, a **500 Internal Server Error** is
- *    returned automatically.
+ * 2. Call `.run(handler)` to close the chain and receive a standard App Router Route Handler
+ *    `(req, routeSegmentContext) => Promise<Response>` that can be exported directly from a route file.
+ * 3. At runtime, dynamic route `params` are resolved (supporting both sync and async `params` in Next.js 15+)
+ *    and injected into `context.params`.
+ * 4. Each middleware is awaited in sequence. If a middleware returns a {@link Response}, the chain is
+ *    **immediately aborted** and that response is returned. If it returns a plain object, that object is
+ *    merged into `context`. If it throws a Next.js internal exception (`redirect()` / `notFound()`), it is
+ *    rethrown; for all other uncaught errors, a **500 Internal Server Error** JSON response is returned automatically.
  *
  * ### Generic parameter
  * `TContext` accumulates the shape of the context as middlewares are composed — each call to
- * `.use()` widens the type to `TContext & TNext`.  Use it to get fully-typed access to context
+ * `.use()` widens the type to `TContext & TNext`. Use it to get fully-typed access to context
  * properties inside the final handler without extra type assertions.
  *
  * @template TContext - Shape of the shared context object passed between middlewares and the
@@ -70,19 +105,18 @@ type AppMiddlewareFn<TContext extends ContextSlice, TNext extends ContextSlice =
  * @example
  * // app/api/example/route.ts
  * interface MyContext {
- *   appName: string;
+ *   userId: string;
  * }
  *
- * export const POST = appPipeline<MyContext>()
- *   .use(checkContentType)   // returns void or Response
- *   .use(extractXAppName)    // returns { appName } or Response
+ * export const GET = appPipeline<MyContext>()
+ *   .use(checkSession)       // returns NextResponse.json({ error: 'Unauthorized' }, { status: 401 }) if invalid
+ *   .use(extractUserId)      // returns { userId: string }
  *   .run(async (req, context) => {
- *     // context.appName is guaranteed to be a string here
- *     const body = await req.json();
- *     return NextResponse.json({ success: true, appName: context.appName, body });
+ *     // context.userId is guaranteed to be a string here
+ *     return NextResponse.json({ userId: context.userId });
  *   });
  */
-export class AppPipeline<TContext extends ContextSlice> {
+export class AppPipeline<TContext extends ContextSlice = ContextSlice> {
     /** Ordered list of registered middleware functions. */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     private middlewares: AppMiddlewareFn<any, any>[] = [];
@@ -91,7 +125,7 @@ export class AppPipeline<TContext extends ContextSlice> {
      * Registers a middleware function and appends it to the execution chain.
      *
      * Each call to `.use()` **widens the accumulated context type** by intersecting `TContext`
-     * with the `TNext` type contributed by the new middleware.  This means the *next* `.use()`
+     * with the `TNext` type contributed by the new middleware. This means the *next* `.use()`
      * call and the final `.run()` handler both see all properties added by previous middlewares
      * without requiring extra type assertions.
      *
@@ -108,7 +142,7 @@ export class AppPipeline<TContext extends ContextSlice> {
      *
      * @example
      * pipeline
-     *   .use(authMiddleware)       // contributes { userId: string }
+     *   .use(sessionMiddleware)    // contributes { userId: string }
      *   .use(rateLimitMiddleware)  // can now read context.userId
      *   .use(loggingMiddleware);
      */
@@ -120,36 +154,37 @@ export class AppPipeline<TContext extends ContextSlice> {
     }
 
     /**
-     * Closes the middleware chain and returns a standard Next.js App Router route handler.
+     * Closes the middleware chain and returns a standard Next.js App Router Route Handler.
      *
-     * The returned function has the signature `(req: Request) => Promise<Response>`, which
-     * is the exact type expected by the App Router when exporting named HTTP-method handlers
-     * (`GET`, `POST`, etc.) from a route file.
+     * The returned function has the signature `(req: Request, routeSegmentContext?: RouteSegmentContext) => Promise<Response>`,
+     * which is the exact signature expected by the App Router when exporting HTTP method handlers
+     * (`GET`, `POST`, `PUT`, `DELETE`, etc.) from a `route.ts` file.
      *
      * **Execution order at runtime:**
      * 1. An empty context object `{}` is initialised and cast to `TContext`.
-     * 2. Each registered middleware is awaited in order:
-     *    - If a middleware returns a `Response` / `NextResponse`, the loop is **immediately
-     *      aborted** and that response is returned to the caller.
-     *    - If a middleware returns a plain object, it is merged into `context` via
-     *      `Object.assign`.
-     *    - If a middleware throws, a **500 Internal Server Error** JSON response is returned.
-     * 3. Once all middlewares succeed, the `handler` is called with `(req, context)` and its
-     *    return value is forwarded to the client. Errors thrown by the handler are also caught
-     *    and converted to a **500 Internal Server Error** response.
+     * 2. If `routeSegmentContext.params` is provided, it is resolved (handling both promises and plain objects)
+     *    and assigned into `context.params`.
+     * 3. Each registered middleware is awaited in order:
+     *    - If a middleware returns a {@link Response} (e.g. via `NextResponse.json(...)`), the chain
+     *      is **immediately aborted** and that response is returned directly.
+     *    - If a middleware returns a plain object, it is merged into `context` via `Object.assign`.
+     *    - If a middleware throws a Next.js internal exception (`redirect()` or `notFound()`), it is rethrown.
+     *    - For any other uncaught error in a middleware, a **500 Internal Server Error** JSON response is returned early.
+     * 4. Once all middlewares complete successfully, `handler` is called with `(req, context)` to generate the final response.
+     * 5. If `handler` throws a Next.js internal exception, it is rethrown; otherwise, uncaught errors result in a **500 Internal Server Error** JSON response.
      *
-     * @param handler - The final route handler that receives the fully-enriched `context`.
-     *   Must return a `Promise<Response>` or a synchronous `Response`.
+     * @param handler - The final Route Handler function that receives the request and fully-enriched `context`.
+     *   Must return a {@link Response} or `Promise<Response>`.
      *
-     * @returns A Next.js-compatible route handler: `(req: Request) => Promise<Response>`.
+     * @returns A Next.js-compatible App Router Route Handler:
+     *   `(req: Request, routeSegmentContext?: RouteSegmentContext) => Promise<Response>`.
      *
      * @example
-     * export const POST = appPipeline<MyContext>()
-     *   .use(checkContentType)
-     *   .use(extractXAppName)
+     * export const GET = appPipeline<MyContext>()
+     *   .use(checkSession)
+     *   .use(extractUserId)
      *   .run(async (req, context) => {
-     *     const body = await req.json();
-     *     return NextResponse.json({ appName: context.appName, body });
+     *     return NextResponse.json({ userId: context.userId });
      *   });
      */
     run(
@@ -157,38 +192,52 @@ export class AppPipeline<TContext extends ContextSlice> {
             req: Request,
             context: TContext
         ) => Promise<Response> | Response
-    ): (req: Request) => Promise<Response> {
-        return async (req: Request): Promise<Response> => {
+    ): (req: Request, routeSegmentContext?: RouteSegmentContext) => Promise<Response> {
+        return async (req: Request, routeSegmentContext?: RouteSegmentContext): Promise<Response> => {
+            // Inizializziamo il contesto e inseriamo i params della rotta se presenti
             const context = {} as TContext;
 
+            if (routeSegmentContext?.params) {
+                // Risolviamo i params sia che siano una Promise (Next.js 15+) sia che siano un oggetto (Next.js 13/14)
+                const resolvedParams = await Promise.resolve(routeSegmentContext.params);
+                Object.assign(context, { params: resolvedParams });
+            }
+
+            // 1. Esecuzione Middleware
             for (const middleware of this.middlewares) {
                 try {
                     const result = await middleware(req, context);
 
-                    // FLOW HALT:
-                    // If the middleware returns a Response, halt the chain immediately
-                    // and forward that response to the client.
+                    // FLOW HALT: Il middleware ha restituito una Response (es. 401, 403, 302)
                     if (result instanceof Response) {
                         return result;
                     }
 
-                    // CONTEXT ENRICHMENT:
-                    // If the middleware returns a plain object, merge it into the context
-                    // so that subsequent middlewares and the final handler can read it.
+                    // CONTEXT ENRICHMENT: Arricchimento del contesto
                     if (result !== null && typeof result === 'object') {
                         Object.assign(context, result);
                     }
                 } catch (error: unknown) {
+                    // EDGE CASE 2: Lasciamo passare i redirect() and notFound() di Next.js
+                    if (isNextInternalError(error)) {
+                        throw error;
+                    }
+
                     const message =
                         error instanceof Error ? error.message : 'Internal Server Error';
                     return NextResponse.json({ error: message }, { status: 500 });
                 }
             }
 
-            // Execute the final handler with the fully-enriched context.
+            // 2. Esecuzione Handler Finale
             try {
                 return await handler(req, context);
             } catch (error: unknown) {
+                // EDGE CASE 2: Lasciamo passare i redirect() e notFound() di Next.js
+                if (isNextInternalError(error)) {
+                    throw error;
+                }
+
                 const message =
                     error instanceof Error ? error.message : 'Internal Server Error';
                 return NextResponse.json({ error: message }, { status: 500 });
@@ -200,11 +249,11 @@ export class AppPipeline<TContext extends ContextSlice> {
 /**
  * Factory helper that instantiates a new {@link AppPipeline} with the given context type.
  *
- * Using this helper instead of `new AppPipeline<TContext>()` keeps route files concise and
- * reads naturally as a fluent chain:
+ * Using this helper instead of `new AppPipeline<TContext>()` keeps Route Handler files concise
+ * and reads naturally as a fluent chain:
  *
  * ```ts
- * export const POST = appPipeline<MyContext>()
+ * export const GET = appPipeline<MyContext>()
  *   .use(someMiddleware)
  *   .run(myHandler);
  * ```
@@ -214,4 +263,5 @@ export class AppPipeline<TContext extends ContextSlice> {
  *
  * @returns A fresh, empty {@link AppPipeline} instance typed to `TContext`.
  */
-export const appPipeline = <TContext extends ContextSlice>() => new AppPipeline<TContext>();
+export const appPipeline = <TContext extends ContextSlice = Record<string, never>>() =>
+    new AppPipeline<TContext>();
